@@ -12,6 +12,7 @@ function App() {
 
   const [photos, setPhotos] = useState(0);
   const [albumCnt, setAlbumCnt] = useState(0);
+  const [filter, setFilter] = useState('');
 
   const onGoogleSignedIn = (isSignedIn) => {
     if (isSignedIn) {
@@ -125,27 +126,30 @@ function App() {
   };
 
   const getPhotoList = async () => {
+    const filterSplit = filter.split('-');
     try {
-      const res = await postApi(`https://photoslibrary.googleapis.com/v1/mediaItems:search`, {
+      const queryFilter = {
         "filters": {
           "dateFilter": {
             "ranges": [
               {
                 "startDate": {
-                  "year": 2019,
-                  "month": 11,
-                  "day": 16
+                  "year": filterSplit[0],
+                  "month": filterSplit[1],
+                  "day": filterSplit[2]
                 },
                 "endDate": {
-                  "year": 2019,
-                  "month": 11,
-                  "day": 16
+                  "year": filterSplit[3],
+                  "month": filterSplit[4],
+                  "day": filterSplit[5]
                 }
               }
             ]
           }
         }
-      }, {});
+      };
+      console.log(queryFilter);
+      const res = await postApi(`https://photoslibrary.googleapis.com/v1/mediaItems:search`, queryFilter, {});
       const parsedRes = await res.json();
       console.log(parsedRes);
       setPhotos(parsedRes.mediaItems);
@@ -164,6 +168,10 @@ function App() {
     }
   };
 
+  const onFilterChange = (event) => {
+    setFilter(event.target.value);
+  };
+
   return (
     <div className="App">
       <h1>Photos Manager</h1>
@@ -178,6 +186,7 @@ function App() {
           <span>Number of albums: {albumCnt}</span>
         </div>
         <div>
+          <input type="text" value={filter} onChange={onFilterChange}/>
           <button onClick={getPhotoList}>Get Photos</button>
           <span>Number of photos: {photos.length}</span>
           <button onClick={download}>Download All</button>
