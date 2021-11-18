@@ -17,11 +17,16 @@ const firebaseConfig = {
 
 console.log('gapi', window.gapi);
 
-const start = () => {
-  window.gapi.auth2.init({
-    client_id: process.env.REACT_APP_client_id,
-    scope: 'https://www.googleapis.com/auth/photoslibrary.readonly'
-  })
+const start = async () => {
+  try {
+    await window.gapi.auth2.init({
+      client_id: process.env.REACT_APP_client_id,
+      scope: 'https://www.googleapis.com/auth/photoslibrary.readonly'
+    });
+  } catch (err) {
+    console.log('init err', err);
+    return;
+  }
 
   console.log('start app');
   ReactDOM.render(
