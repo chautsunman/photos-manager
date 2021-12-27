@@ -1,4 +1,4 @@
-import {useState, useEffect} from 'react';
+import {useState, useEffect, useCallback, useMemo} from 'react';
 import { getAuth, signInWithCredential, GoogleAuthProvider } from "firebase/auth";
 import { useUser } from 'reactfire';
 import JSZip from 'jszip';
@@ -13,12 +13,20 @@ function App() {
   const [googleCredentials, setGoogleCredentials] = useState(null);
 
   const [photos, setPhotos] = useState([]);
-  const [albumCnt, setAlbumCnt] = useState(0);
+  const [albums, setAlbums] = useState([]);
+  const [sharedAlbums, setSharedAlbums] = useState([]);
   const [filter, setFilter] = useState('');
+  const [lastFilterType, setLastFilterType] = useState(null);
+  const [lastFilter, setLastFilter] = useState('');
+  const [getPhotosPageToken, setGetPhotosPageToken] = useState(null);
+  const [lastGetAlbumPhotosAlbumId, setLastGetAlbumPhotosAlbumId] = useState(null);
+  const [getAlbumPhotosPageToken, setGetAlbumPhotosPageToken] = useState(null);
 
   const [downloadedPhotos, setDownloadedPhotos] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+
+  const PAGE_SIZE = 20;
 
   const onGoogleSignedIn = (isSignedIn) => {
     console.log('onGoogleSignedIn', isSignedIn);
@@ -79,7 +87,7 @@ function App() {
       });
   };
 
-  const getApi = async (apiPath, urlParams, options) => {
+  const getApi = useCallback(async (apiPath, urlParams, options) => {
     if (!googleCredentials) {
       console.log('google credentials is not set');
       return Promise.reject();
@@ -91,9 +99,9 @@ function App() {
         'Authorization': `Bearer ${googleCredentials.accessToken}`
       }
     })
-  };
+  }, [googleCredentials]);
 
-  const postApi = async (apiPath, data, options) => {
+  const postApi = useCallback(async (apiPath, data, options) => {
     if (!googleCredentials) {
       console.log('google credentials is not set');
       return Promise.reject();
@@ -112,60 +120,163 @@ function App() {
       referrerPolicy: 'no-referrer',
       body: JSON.stringify(data)
     });
-  };
+  }, [googleCredentials]);
 
-  const listAlbums = async () => {
+  const mergeFilter = useCallback((filter, pageToken, pageSize=PAGE_SIZE) => {
+    if (pageToken) {
+      return {
+        ...filter,
+        pageSize: pageSize,
+        pageToken: pageToken
+      };
+    } else {
+      return {
+        ...filter,
+        pageSize: pageSize
+      };
+    }
+  }, []);
+
+  const _listAlbums = useCallback(async (api, albumsPropName, cb) => {
     try {
       const urlParams = new URLSearchParams();
-      const res = await getApi(`https://photoslibrary.googleapis.com/v1/albums`, urlParams, {});
+      const res = await getApi(api, urlParams, {});
       const parsedRes = await res.json();
       console.log(parsedRes);
-      setAlbumCnt(parsedRes.mediaItems.length);
+      cb(parsedRes[albumsPropName]);
     } catch (err) {
       console.log(err);
     }
-  };
+  }, [getApi]);
+  const listAlbums = useCallback(() => _listAlbums('https://photoslibrary.googleapis.com/v1/albums', 'albums', setAlbums), [_listAlbums, setAlbums, setGetAlbumPhotosPageToken]);
+  const listSharedAlbums = useCallback(() => _listAlbums('https://photoslibrary.googleapis.com/v1/sharedAlbums', 'sharedAlbums', setSharedAlbums), [_listAlbums, setSharedAlbums]);
 
-  const getPhotoList = async () => {
+  const getDateFilter = useCallback((pageToken) => {
     const filterSplit = filter.split('-');
-    try {
-      const queryFilter = {
-        "filters": {
-          "dateFilter": {
-            "ranges": [
-              {
-                "startDate": {
-                  "year": filterSplit[0],
-                  "month": filterSplit[1],
-                  "day": filterSplit[2]
-                },
-                "endDate": {
-                  "year": filterSplit[3],
-                  "month": filterSplit[4],
-                  "day": filterSplit[5]
-                }
+    return mergeFilter({
+      "filters": {
+        "dateFilter": {
+          "ranges": [
+            {
+              "startDate": {
+                "year": filterSplit[0],
+                "month": filterSplit[1],
+                "day": filterSplit[2]
+              },
+              "endDate": {
+                "year": filterSplit[3],
+                "month": filterSplit[4],
+                "day": filterSplit[5]
               }
-            ]
-          }
+            }
+          ]
         }
-      };
-      console.log(queryFilter);
+      }
+    }, pageToken);
+  }, [filter, mergeFilter]);
+
+  const getAlbumFilter = useCallback((albumId, pageToken) => {
+    return mergeFilter({
+      albumId: albumId
+    }, pageToken);
+  }, [mergeFilter]);
+
+  const pageToken = useMemo(() => {
+    switch (lastFilterType) {
+      case 'date':
+        return getPhotosPageToken;
+      case 'album':
+        return getAlbumPhotosPageToken;
+      default:
+        return null;
+    }
+  }, [lastFilterType, getPhotosPageToken, getAlbumPhotosPageToken]);
+
+  const _getPhotoList = useCallback(async (queryFilter, filterChanged, setPageTokenCb) => {
+    console.log(queryFilter, `filterChanged: ${filterChanged}`);
+    try {
       const res = await postApi(`https://photoslibrary.googleapis.com/v1/mediaItems:search`, queryFilter, {});
       const parsedRes = await res.json();
-      console.log(parsedRes);
-      setPhotos(parsedRes.mediaItems);
+      console.log('get photos res', parsedRes);
+      if (parsedRes && parsedRes.mediaItems) {
+        if (filterChanged) {
+          setPhotos(parsedRes.mediaItems);
+        } else {
+          setPhotos([...photos, ...parsedRes.mediaItems]);
+        }
+        if (parsedRes.nextPageToken) {
+          setPageTokenCb(parsedRes.nextPageToken);
+        } else {
+          setPageTokenCb(null);
+        }
+      }
     } catch (err) {
       console.log(err);
     }
-  };
+  }, [postApi, photos, setPhotos]);
+  const getPhotos = useCallback(() => {
+    console.log('get photos');
+    const filterTypeChanged = lastFilterType !== 'date';
+    let filterChanged;
+    let finalPageToken;
+    if (!filterTypeChanged && filter === lastFilter) {
+      filterChanged = false;
+      if (pageToken) {
+        finalPageToken = pageToken;
+      } else {
+        console.log('got all photos');
+        return;
+      }
+    } else {
+      filterChanged = true;
+      finalPageToken = null;
+    }
+    _getPhotoList(getDateFilter(finalPageToken), filterChanged, setGetPhotosPageToken);
+    setLastFilterType('date');
+    setLastFilter(filter);
+  }, [_getPhotoList, getDateFilter, filter, lastFilterType, setLastFilterType, lastFilter, setLastFilter, pageToken, setGetPhotosPageToken]);
+  const getAlbumPhotos = useCallback((albumId) => {
+    console.log('get album photos', albumId);
+    const filterTypeChanged = lastFilterType !== 'album';
+    let filterChanged;
+    let finalPageToken;
+    if (!filterTypeChanged && albumId === lastGetAlbumPhotosAlbumId) {
+      filterChanged = false;
+      if (pageToken) {
+        finalPageToken = pageToken;
+      } else {
+        console.log('got all photos');
+        return;
+      }
+    } else {
+      filterChanged = true;
+      finalPageToken = null;
+    }
+    _getPhotoList(getAlbumFilter(albumId, finalPageToken), filterChanged, setGetAlbumPhotosPageToken);
+    setLastFilterType('album');
+    setLastGetAlbumPhotosAlbumId(albumId);
+  }, [_getPhotoList, getAlbumFilter, lastFilterType, setLastFilterType, lastGetAlbumPhotosAlbumId, setLastGetAlbumPhotosAlbumId, pageToken, setGetAlbumPhotosPageToken]);
 
-  const getDownloadUrl = (photo) => {
+  const getNextPagePhotos = useCallback((e) => {
+    switch (lastFilterType) {
+      case 'date':
+        getPhotos();
+        break;
+      case 'album':
+        getAlbumPhotos(lastGetAlbumPhotosAlbumId);
+        break;
+      default:
+        break;
+    }
+  }, [getPhotos, getAlbumPhotos, lastFilterType, lastGetAlbumPhotosAlbumId]);
+
+  const getDownloadUrl = useCallback((photo) => {
     return `${photo.baseUrl}=d`;
-  };
+  }, []);
 
-  const getDownloadCommand = (photo) => {
+  const getDownloadCommand = useCallback((photo) => {
     return `curl ${getDownloadUrl(photo)} --output ${photo.filename}`;
-  };
+  }, [getDownloadUrl]);
 
   const download = async () => {
     // setDownloadedPhotos(0);
@@ -252,11 +363,31 @@ function App() {
         </div>
         <div>
           <button onClick={listAlbums}>List Albums</button>
-          <span>Number of albums: {albumCnt}</span>
+          <span>Number of albums: {albums.length}</span>
+        </div>
+        <div>
+          {albums.map((album) => (
+            <div key={album.id}>{album.title} ({album.mediaItemsCount} Photos) <button onClick={() => getAlbumPhotos(album.id)}>Get Photos</button></div>
+          ))}
+        </div>
+        <div>
+          <button onClick={listSharedAlbums}>List Shared Albums</button>
+          <span>Number of shared albums: {sharedAlbums.length}</span>
+        </div>
+        <div>
+          {sharedAlbums.map((album) => (
+            <div key={album.id}>{album.title} ({album.mediaItemsCount} Photos) <button onClick={() => getAlbumPhotos(album.id)}>Get Photos</button></div>
+          ))}
         </div>
         <div>
           <input type="text" value={filter} onChange={onFilterChange}/>
-          <button onClick={getPhotoList}>Get Photos</button>
+          <button onClick={getPhotos}>Get Photos</button>
+        </div>
+        <div>
+          <span>lastFilterType: {lastFilterType}, pageToken: {pageToken}</span>
+          {pageToken && getNextPagePhotos && <button onClick={getNextPagePhotos}>Next page</button>}
+        </div>
+        <div>
           <span>Number of photos: {photos.length}</span>
           {!downloading && <button onClick={download}>Download All</button>}
           {downloading && <span>Downloading {downloadedPhotos}/{photos.length} photos</span>}
@@ -273,7 +404,7 @@ function App() {
           <div>Commands to download photos</div>
           <button onClick={copyDownloadCommands}>Copy commands</button>
           <button onClick={downloadDownloadCommands}>Download shell script</button>
-          {downloadCommands.map(downloadCommand => <p>{downloadCommand}</p>)}
+          {downloadCommands.map(downloadCommand => <p key={downloadCommand}>{downloadCommand}</p>)}
         </div>
         <div>Error msg: {errorMsg}</div>
       </div>
